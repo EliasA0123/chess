@@ -1,7 +1,7 @@
 use crate::Board;
 
 // https://matklad.github.io/2023/01/04/on-random-numbers.html
-pub fn rng(seed: u32) -> impl Iterator<Item = u32> {
+pub fn rng(seed: KEY_SIZE) -> impl Iterator<Item = KEY_SIZE> {
     let mut random = seed;
     std::iter::repeat_with(move || {
         random ^= random << 13;
@@ -12,14 +12,14 @@ pub fn rng(seed: u32) -> impl Iterator<Item = u32> {
 }
 
 pub struct ZobristHasher {
-    piece_squares: [[u32; 64]; 12],
-    side_to_move: u32,
-    castles: [u32; 4],
-    en_passant_files: [u32; 8]
+    piece_squares: [[KEY_SIZE; 64]; 12],
+    side_to_move: KEY_SIZE,
+    castles: [KEY_SIZE; 4],
+    en_passant_files: [KEY_SIZE; 8]
 }
 
 type KEY_SIZE = u32;
-const SEED: u32 = 0b11101010100100100110000110011110;
+const SEED: KEY_SIZE = 0b11101010100100100110000110011110;
 
 impl ZobristHasher {
     pub fn init() -> Self {
@@ -46,7 +46,7 @@ impl ZobristHasher {
         zobrist
     }
 
-    pub fn hash(&self, board: &Board) -> u32 {
+    pub fn hash(&self, board: &Board) -> KEY_SIZE {
         let mut hash = 0;
         for sq in 0..64 {
             let (y, x) = (sq / 8, sq % 8);

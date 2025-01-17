@@ -698,13 +698,13 @@ impl Board {
     }
 }
 
-struct TranspositionTable {
+struct TransposTable {
     keys: Vec<u32>,
     vals: Vec<i32>,
     hasher: Rc<ZobristHasher>
 }
 
-impl TranspositionTable {
+impl TransposTable {
     fn new(hasher: Rc<ZobristHasher>) -> Self {
         Self {
             keys: Vec::with_capacity(256),
@@ -713,25 +713,32 @@ impl TranspositionTable {
         }
     }
 
-    fn get(&self, key: &u32) -> Option<i32> {
-        match self.keys.iter().position(|k| k == key) {
+    fn get(&self, board: &Board) -> Option<i32> {
+        let key = self.hasher.hash(board);
+        match self.keys.iter().position(|k| *k == key) {
             Some(idx) => Some(self.vals[idx]),
             None => None
         }
     }
 
-    fn insert(&mut self, key: u32, value: i32) {
-        match self.keys.iter().position(|k| k == &key) {
-            Some(idx) => { self.vals[idx] = value; }
+    fn insert(&mut self, board: &Board, score: i32) {
+        let key = self.hasher.hash(&board);
+        match self.keys.iter().position(|k| *k == key) {
+            Some(idx) => { self.vals[idx] = score; }
             None => {
                 self.keys.push(key);
-                self.vals.push(value);
+                self.vals.push(score);
             }
         }
     }
+
+    fn clear(&mut self) {
+        self.keys.clear();
+        self.vals.clear();
+    }
 }
 
-fn negamax(board: &mut Board, depth: usize, mut alpha: i32, beta: i32) -> i32 {
+fn negamax(board: &mut Board, depth: usize, mut alpha: i32, beta: i32, table: &mut TransposTable) -> i32 {
     if depth == 0 {
         return board.score();
     }
@@ -746,7 +753,14 @@ fn negamax(board: &mut Board, depth: usize, mut alpha: i32, beta: i32) -> i32 {
     let mut max = -i32::MAX;
     for mv in opts {
         board.make_move(&mv);
-        let score = -negamax(board, depth - 1, -beta, -alpha);
+        let score = match table.get(&board) {
+            Some(s) => s,
+            None => {
+                let s = -negamax(board, depth - 1, -beta, -alpha, table);
+                table.insert(&board, s);
+                s
+            }
+        };
         board.undo_move(&mv);
         if score > max {
             max = score;
@@ -761,11 +775,18 @@ fn negamax(board: &mut Board, depth: usize, mut alpha: i32, beta: i32) -> i32 {
     max
 }
 
-fn find_best_move(board: &mut Board, max_depth: usize) -> Option<Move> {
+fn find_best_move(board: &mut Board, max_depth: usize, table: &mut TransposTable) -> Option<Move> {
     match board.get_legal_moves().into_iter().map(|mv| {
         // println!("{}", mv.uci());
         board.make_move(&mv);
-        let score = -negamax(board, max_depth - 1, -i32::MAX, i32::MAX);
+        let score = match table.get(&board) {
+            Some(s) => s,
+            None => {
+                let s = -negamax(board, max_depth - 1, -i32::MAX, i32::MAX, table);
+                table.insert(&board, s);
+                s
+            }
+        };
         board.undo_move(&mv);
         (mv, score)
     }).max_by(|(_, s1), (_, s2)| s1.cmp(s2)) {
@@ -774,10 +795,10 @@ fn find_best_move(board: &mut Board, max_depth: usize) -> Option<Move> {
     }
 }
 
-fn play_vs_self(depth: usize) {
+fn play_vs_self(depth: usize, table: &mut TransposTable) {
     let mut board = Board::default();
     loop {
-        match find_best_move(&mut board, depth) {
+        match find_best_move(&mut board, depth, table) {
             Some(mv) => {
                 println!("{}", mv.uci());
                 board.make_move(&mv);
@@ -792,6 +813,7 @@ fn play_vs_self(depth: usize) {
             println!("ggs (50 move rule)");
             return;
         }
+        table.clear();
     }
 }
 
@@ -805,6 +827,8 @@ fn get_input(msg: &str) -> String {
 }
 
 fn main() {
+    let hasher = Rc::new(ZobristHasher::init());
+    let mut table = TransposTable::new(hasher);
     // play_vs_self(4);
 
     let fen = get_input("Input FEN:");
@@ -821,7 +845,7 @@ fn main() {
     // // let depth = 3;
 
     let start = Instant::now();
-    let best_move = find_best_move(&mut board, depth);
+    let best_move = find_best_move(&mut board, depth, &mut table);
     println!("Time: {:?}", start.elapsed());
 
     match best_move {
