@@ -1,6 +1,9 @@
+mod zobrist;
+use crate::zobrist::ZobristHasher;
 use std::{
     i32,
-    time::Instant
+    time::Instant,
+    rc::Rc
 };
 
 const R_STEPS: [(isize, isize); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
@@ -104,7 +107,7 @@ impl PieceType {
 #[derive(Debug, Clone, Copy, PartialEq, Hash)]
 struct Piece {
     piece_type: PieceType,
-    is_white: bool
+    color: bool
 }
 
 impl Piece {
@@ -112,7 +115,7 @@ impl Piece {
         if let Some(piece_type) = PieceType::from_char(c) {
             Some(Piece {
                 piece_type,
-                is_white: c.is_ascii_uppercase()
+                color: c.is_ascii_uppercase()
             })
         } else {
             None
@@ -120,11 +123,15 @@ impl Piece {
     }
 
     fn to_string(&self) -> String {
-        if self.is_white {
+        if self.color {
             self.piece_type.to_string().to_ascii_uppercase()
         } else {
             self.piece_type.to_string()
         }
+    }
+
+    fn zobrist_index(&self) -> usize {
+        self.piece_type as usize + if self.color {0} else {6}
     }
 }
 
@@ -175,14 +182,14 @@ impl Move {
 struct UndoData {
     captured: Option<Piece>,
     en_passant: Option<Coord>,
-    allowed_castling: (bool, bool, bool, bool),
+    allowed_castling: [bool; 4],
     halfmove_count: usize,
 }
 
 struct Board {
     board: [[Option<Piece>; 8]; 8],
     side_to_move: bool,
-    allowed_castling: (bool, bool, bool, bool), // KQkq
+    allowed_castling: [bool; 4], // KQkq
     en_passant: Option<Coord>,
     halfmove_count: usize,
     fullmove_num: usize,
@@ -252,12 +259,12 @@ impl Board {
 
         // Castling avilability - TODO: add error handling
         let Some(allowed_castling) = fen_fields.next() else { return None; };
-        let allowed_castling = (
+        let allowed_castling = [
             allowed_castling.contains("K"),
             allowed_castling.contains("Q"),
             allowed_castling.contains("k"),
             allowed_castling.contains("q"),
-        );
+        ];
 
         // En passant
         let Some(en_passant) = fen_fields.next() else { return None; };
@@ -319,10 +326,10 @@ impl Board {
         let side_to_move = if self.side_to_move {"w"} else {"b"};
 
         let mut castling = String::with_capacity(4);
-        if self.allowed_castling.0 { castling.push('K'); }
-        if self.allowed_castling.1 { castling.push('Q'); }
-        if self.allowed_castling.2 { castling.push('k'); }
-        if self.allowed_castling.3 { castling.push('q'); }
+        if self.allowed_castling[0] { castling.push('K'); }
+        if self.allowed_castling[1] { castling.push('Q'); }
+        if self.allowed_castling[2] { castling.push('k'); }
+        if self.allowed_castling[3] { castling.push('q'); }
         if castling == "" { castling.push('-'); }
 
         let en_passant = match self.en_passant {
@@ -370,7 +377,7 @@ impl Board {
         self.board[to_y][to_x] = if let MoveType::Promotion(pt) = mv.move_type {
             Some(Piece {
                 piece_type: pt,
-                is_white: piece.is_white,
+                color: piece.color,
             })
         } else {
             Some(piece)
@@ -397,23 +404,23 @@ impl Board {
         // Update castling availability -- a bit inefficient but like whatevs?
         match (from_y, from_x) {
             (7, 4) => { // K
-                self.allowed_castling.0 = false;
-                self.allowed_castling.1 = false;
+                self.allowed_castling[0] = false;
+                self.allowed_castling[1] = false;
             },
             (0, 4) => { // k
-                self.allowed_castling.2 = false;
-                self.allowed_castling.3 = false;
+                self.allowed_castling[2] = false;
+                self.allowed_castling[3] = false;
             },
-            (7, 7) => { self.allowed_castling.0 = false; }, // qR
-            (7, 0) => { self.allowed_castling.1 = false; }, // kR
-            (0, 7) => { self.allowed_castling.2 = false; }, // qr
-            (0, 0) => { self.allowed_castling.3 = false; }, // kr
+            (7, 7) => { self.allowed_castling[0] = false; }, // qR
+            (7, 0) => { self.allowed_castling[1] = false; }, // kR
+            (0, 7) => { self.allowed_castling[2] = false; }, // qr
+            (0, 0) => { self.allowed_castling[3] = false; }, // kr
             _ => ()
         };
 
         // Update en passant square
         if piece.piece_type == PieceType::Pawn && (if to_y > from_y {to_y - from_y == 2} else {from_y - to_y == 2}) {
-            self.en_passant = Some(((to_y as isize - {if piece.is_white {-1} else {1}}) as usize, to_x));
+            self.en_passant = Some(((to_y as isize - {if piece.color {-1} else {1}}) as usize, to_x));
         } else {
             self.en_passant = None;
         }
@@ -441,7 +448,7 @@ impl Board {
         self.board[from_y][from_x] = if let MoveType::Promotion(_) = mv.move_type {
             Some(Piece {
                 piece_type: PieceType::Pawn,
-                is_white: piece.is_white
+                color: piece.color
             })
         } else {
             Some(piece)
@@ -451,7 +458,7 @@ impl Board {
         if mv.move_type == MoveType::EnPassant {
             self.board[from_y][to_x] = Some(Piece {
                 piece_type: PieceType::Pawn,
-                is_white: self.side_to_move
+                color: self.side_to_move
             });
         }
 
@@ -487,7 +494,7 @@ impl Board {
 
     fn square_is_color(&self, y: usize, x: usize, color: bool) -> bool {
         match self.board[y][x] {
-            Some(piece) => piece.is_white == color,
+            Some(piece) => piece.color == color,
             None => false
         }
     }
@@ -520,7 +527,7 @@ impl Board {
     }
 
     fn get_linear_moves(&self, y: usize, x: usize, step_list: &[(isize, isize)], one_step_only: bool) -> Vec<Move> {
-        let color = self.board[y][x].unwrap().is_white;
+        let color = self.board[y][x].unwrap().color;
         let mut moves = Vec::new();
         for (step_y, step_x) in step_list {
             let mut test_y = (y as isize + step_y) as usize;
@@ -558,12 +565,13 @@ impl Board {
     fn get_queen_moves(&self, y: usize, x: usize) -> Vec<Move> {
         self.get_linear_moves(y, x, &KQ_STEPS, false)
     }
+    // TODO: get rid of this stupid ahh function
     fn castling_is_ok(&self, castle: usize, y: usize, x: usize) -> bool {
         let (req_y, allowed, empty) = match castle {
-            0 => (7, self.allowed_castling.0, [(7, 5), (7, 5), (7, 6)]), // duplicate items to line up sizes :skull:
-            1 => (7, self.allowed_castling.1, [(7, 1), (7, 2), (7, 3)]),
-            2 => (0, self.allowed_castling.2, [(0, 5), (0, 5), (0, 6)]),
-            3 => (0, self.allowed_castling.3, [(0, 1), (0, 2), (0, 3)]),
+            0 => (7, self.allowed_castling[0], [(7, 5), (7, 5), (7, 6)]), // duplicate items to line up sizes :skull:
+            1 => (7, self.allowed_castling[1], [(7, 1), (7, 2), (7, 3)]),
+            2 => (0, self.allowed_castling[2], [(0, 5), (0, 5), (0, 6)]),
+            3 => (0, self.allowed_castling[3], [(0, 1), (0, 2), (0, 3)]),
             x => panic!("castling_is_ok: illegal `castle` arg: {}", x)
         };
         y == req_y && x == 4 && allowed && empty.into_iter().all(|(y, x)| self.board[y][x].is_none())
@@ -581,7 +589,7 @@ impl Board {
     }
 
     fn get_pawn_moves(&self, y: usize, x: usize) -> Vec<Move> {
-        let color = self.board[y][x].unwrap().is_white;
+        let color = self.board[y][x].unwrap().color;
         let pawn_dir = if color {-1} else {1};
         let will_promote = (y as isize + pawn_dir) == {if color {0} else {7}};
         let mut moves = Vec::new();
@@ -661,7 +669,7 @@ impl Board {
         let king = (0..64).into_iter().map(|i| (i / 8, i % 8))
         .find(|&(y, x)|
             match self.board[y][x] {
-                Some(piece) => piece.piece_type == PieceType::King && piece.is_white == color,
+                Some(piece) => piece.piece_type == PieceType::King && piece.color == color,
                 None => false
             }
         ).unwrap();
@@ -690,6 +698,38 @@ impl Board {
     }
 }
 
+struct TranspositionTable {
+    keys: Vec<u32>,
+    vals: Vec<i32>,
+    hasher: Rc<ZobristHasher>
+}
+
+impl TranspositionTable {
+    fn new(hasher: Rc<ZobristHasher>) -> Self {
+        Self {
+            keys: Vec::with_capacity(256),
+            vals: Vec::with_capacity(256),
+            hasher: hasher.clone()
+        }
+    }
+
+    fn get(&self, key: &u32) -> Option<i32> {
+        match self.keys.iter().position(|k| k == key) {
+            Some(idx) => Some(self.vals[idx]),
+            None => None
+        }
+    }
+
+    fn insert(&mut self, key: u32, value: i32) {
+        match self.keys.iter().position(|k| k == &key) {
+            Some(idx) => { self.vals[idx] = value; }
+            None => {
+                self.keys.push(key);
+                self.vals.push(value);
+            }
+        }
+    }
+}
 
 fn negamax(board: &mut Board, depth: usize, mut alpha: i32, beta: i32) -> i32 {
     if depth == 0 {
